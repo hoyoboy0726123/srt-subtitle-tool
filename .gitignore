@@ -1,0 +1,61 @@
+# 環境變數(含 API key,絕對不要 commit)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# 輸出檔(由工具生成,不該 commit)
+output/
+
+# 本地 SQLite 額度資料庫
+~/.srt_corrector/
+.srt_corrector/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# 臨時檔
+*.log
+*.tmp
+*.bak
+
+# 測試媒體素材(私人 / 大檔,不 commit)
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.m4v
+*.flv
+*.wmv
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+*.wma
+
+# 測試 SRT / diff 輸出(根目錄上的散落檔)
+/Wisper.srt
+/srt_diff.txt
+/*.transcribed.srt
+/*.corrected.srt
+/未命名*.srt
