@@ -903,6 +903,12 @@ class SRTToolV2(ctk.CTk):
                                             command=self._on_volume_change)
         self.volume_slider.set(80)
         self.volume_slider.pack(side="left")
+        # 截圖 + GIF 按鈕
+        ctk.CTkButton(ctrl_row, text="📷 截圖", width=70,
+                      command=self._save_frame_png).pack(side="left", padx=(20, 2))
+        ctk.CTkButton(ctrl_row, text="🎞 GIF", width=70,
+                      fg_color="#ea580c", hover_color="#c2410c",
+                      command=self._export_gif).pack(side="left", padx=2)
 
         # timeline scrubber
         self.scrubber = ctk.CTkSlider(left_col, from_=0, to=100,
@@ -972,6 +978,7 @@ class SRTToolV2(ctk.CTk):
             "<Motion>", lambda e: self._track_motion(e, "image"))
 
         self._track_drag_state = None
+        self._setup_shortcuts()
 
         # 視窗 resize → 重畫縮圖 + tracks(用戶要求:寬度跟著影片區同步)
         self.timeline_canvas.bind("<Configure>", lambda e: self._on_timeline_resize())
@@ -1326,6 +1333,16 @@ class SRTToolV2(ctk.CTk):
         self.export_srt_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(opt_row1, text="輸出獨立 SRT",
                         variable=self.export_srt_var).pack(side="left", padx=10)
+
+        # 淡入淡出
+        fade_row = ctk.CTkFrame(out_card, fg_color="transparent")
+        fade_row.pack(fill="x", padx=10, pady=(2, 0))
+        self.fade_in_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(fade_row, text="淡入(0~1.5s)",
+                        variable=self.fade_in_var).pack(side="left", padx=2)
+        self.fade_out_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(fade_row, text="淡出(尾段 1.5s)",
+                        variable=self.fade_out_var).pack(side="left", padx=10)
 
         opt_row2 = ctk.CTkFrame(out_card, fg_color="transparent")
         opt_row2.pack(fill="x", padx=10, pady=(0, 0))
@@ -3017,6 +3034,210 @@ class SRTToolV2(ctk.CTk):
         # 全沒有 → 還是回第一個(輸出時會報錯)
         return next(iter(TEXT_FONTS.keys()))
 
+    # ----------------- 快捷鍵 -----------------
+
+    def _setup_shortcuts(self):
+        """全域快捷鍵 — Space 播停 / J K L 倒停順 / I O 標起終 / Del 移除最後 cut / Ctrl+S 存項目 / S 截圖。"""
+        bindings = {
+            "<space>":        lambda e: self._kb_toggle_play(),
+            "<KeyPress-j>":   lambda e: self._kb_rate_step(-1),
+            "<KeyPress-k>":   lambda e: self._kb_pause(),
+            "<KeyPress-l>":   lambda e: self._kb_rate_step(1),
+            "<KeyPress-i>":   lambda e: self._mark_cut_in(),
+            "<KeyPress-o>":   lambda e: self._mark_cut_out(),
+            "<Delete>":       lambda e: self._kb_delete_last_cut(),
+            "<Control-s>":    lambda e: self._save_project(),
+            "<Control-o>":    lambda e: self._open_project(),
+            "<Control-z>":    lambda e: self._kb_undo(),
+            "<Control-y>":    lambda e: self._kb_redo(),
+            "<KeyPress-s>":   lambda e: self._save_frame_png(),
+            "<Right>":        lambda e: self._seek_rel(5),
+            "<Left>":         lambda e: self._seek_rel(-5),
+        }
+        for keyseq, callback in bindings.items():
+            try:
+                self.bind_all(keyseq, callback)
+            except Exception:
+                pass
+
+    def _kb_toggle_play(self):
+        # 若焦點在輸入框,別搶 Space
+        focused = self.focus_get()
+        if isinstance(focused, (ctk.CTkEntry, ctk.CTkTextbox)) or \
+           (focused and focused.winfo_class() in ("Entry", "Text")):
+            return
+        self._toggle_play()
+
+    def _kb_pause(self):
+        if self.player and self.player.is_playing():
+            self.player.pause()
+            self.play_btn.configure(text="▶ 播放")
+
+    def _kb_rate_step(self, direction: int):
+        """J: 倒退/減速,L: 快進/加速。先播狀態 → 速度切換,暫停 → seek。"""
+        if self.player is None:
+            return
+        if self.player.is_playing():
+            cur_rate = float(self.speed_var.get().replace("x", ""))
+            speeds = [float(s.replace("x", "")) for s in SPEED_OPTIONS]
+            idx = min(range(len(speeds)), key=lambda i: abs(speeds[i] - cur_rate))
+            new_idx = max(0, min(len(speeds) - 1, idx + direction))
+            new_rate = speeds[new_idx]
+            self.speed_var.set(f"{new_rate}x")
+            self.player.set_rate(new_rate)
+        else:
+            self._seek_rel(direction * 5)
+
+    def _kb_delete_last_cut(self):
+        if not self.cuts:
+            return
+        self.cuts.pop()
+        self._render_cut_list()
+        try: self._render_tracks()
+        except Exception: pass
+        self.status_lbl.configure(text=f"✓ 移除最後一個剪輯片段(剩 {len(self.cuts)})")
+
+    # ----------------- Undo/Redo(剪輯狀態 snapshot) -----------------
+
+    def _kb_undo(self):
+        if not hasattr(self, "_undo_stack"):
+            self._undo_stack = []
+            self._redo_stack = []
+        if not self._undo_stack:
+            self.status_lbl.configure(text="(沒有可還原的操作)")
+            return
+        # push current to redo, pop from undo
+        cur = self._snapshot_state()
+        self._redo_stack.append(cur)
+        prev = self._undo_stack.pop()
+        self._restore_state(prev)
+        self.status_lbl.configure(text=f"↶ 還原(undo stack: {len(self._undo_stack)})")
+
+    def _kb_redo(self):
+        if not hasattr(self, "_redo_stack") or not self._redo_stack:
+            self.status_lbl.configure(text="(沒有可重做的操作)")
+            return
+        cur = self._snapshot_state()
+        if not hasattr(self, "_undo_stack"):
+            self._undo_stack = []
+        self._undo_stack.append(cur)
+        nxt = self._redo_stack.pop()
+        self._restore_state(nxt)
+        self.status_lbl.configure(text=f"↷ 重做(redo stack: {len(self._redo_stack)})")
+
+    def _push_undo_snapshot(self):
+        """每次重大狀態改變前呼叫 — 把當前 state 存進 undo stack。"""
+        if not hasattr(self, "_undo_stack"):
+            self._undo_stack = []
+            self._redo_stack = []
+        self._undo_stack.append(self._snapshot_state())
+        self._redo_stack.clear()  # 新動作後 redo 失效
+        if len(self._undo_stack) > 50:
+            self._undo_stack.pop(0)
+
+    def _snapshot_state(self) -> dict:
+        import copy
+        return {
+            "cuts": list(self.cuts),
+            "crop_region": self.crop_region,
+            "text_overlays": copy.deepcopy(self.text_overlays),
+            "image_overlays": copy.deepcopy(self.image_overlays),
+            "bg_music_clips": copy.deepcopy(self.bg_music_clips),
+        }
+
+    def _restore_state(self, s: dict):
+        self.cuts = list(s.get("cuts", []))
+        self.crop_region = s.get("crop_region")
+        self.text_overlays = s.get("text_overlays", [])
+        self.image_overlays = s.get("image_overlays", [])
+        self.bg_music_clips = s.get("bg_music_clips", [])
+        self._render_cut_list()
+        self._render_text_overlay_list()
+        self._render_image_overlay_list()
+        self._render_bg_clips_list()
+        self._render_tracks()
+        self._apply_crop_preview()
+
+    # ----------------- 截圖另存 PNG -----------------
+
+    def _save_frame_png(self):
+        if not self.media_path or not self.player:
+            return
+        try:
+            tmp_jpg = self._capture_current_frame()
+        except Exception as e:
+            messagebox.showerror("截圖", str(e))
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dst = output_dir(self.media_path, "snapshots") / \
+              f"{self.media_path.stem}.snapshot.{stamp}.png"
+        try:
+            from PIL import Image
+            Image.open(tmp_jpg).save(dst, "PNG")
+            self.status_lbl.configure(text=f"📷 截圖存到 output/snapshots/{dst.name}")
+        except Exception as e:
+            messagebox.showerror("截圖", f"PNG 存檔失敗: {e}")
+
+    # ----------------- GIF 輸出 -----------------
+
+    def _export_gif(self):
+        """從當前 cut_in 跟 cut_out 之間輸出 GIF。沒設就用 0~10s。"""
+        if not self.media_path or not self.player:
+            messagebox.showwarning("GIF", "請先載入影片")
+            return
+        st = self.cut_in if self.cut_in is not None else self.player.get_time_sec()
+        ed = self.cut_out if self.cut_out is not None else min(self.player.duration, st + 10)
+        if ed <= st:
+            messagebox.showwarning("GIF", "終點必須晚於起點")
+            return
+        if ed - st > 30:
+            if not messagebox.askyesno("GIF", f"片段 {ed-st:.1f}s 太長,gif 會很大,要繼續嗎?"):
+                return
+        threading.Thread(target=self._run_gif_export, args=(st, ed), daemon=True).start()
+
+    def _run_gif_export(self, st: float, ed: float):
+        overlay_ref = {"ov": None}
+        self.after(0, lambda: overlay_ref.update(
+            ov=ProgressOverlay(self, "輸出 GIF", "ffmpeg 兩階段(palette + gen)...")))
+        try:
+            import tempfile, hashlib
+            ffmpeg = get_ffmpeg()
+            sig = hashlib.md5(f"gif_{self.media_path}_{st}_{ed}".encode()).hexdigest()[:8]
+            tmp = Path(tempfile.gettempdir()) / f"srt_v2_gif_{sig}"
+            tmp.mkdir(parents=True, exist_ok=True)
+            palette = tmp / "palette.png"
+            # 1. palette
+            r = subprocess.run(
+                [ffmpeg, "-y", "-ss", str(st), "-to", str(ed),
+                 "-i", str(self.media_path),
+                 "-vf", "fps=12,scale=480:-1:flags=lanczos,palettegen",
+                 str(palette)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if r.returncode != 0:
+                raise RuntimeError(f"palette gen failed: {r.stderr[-300:]}")
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out = output_dir(self.media_path, "gif") / \
+                  f"{self.media_path.stem}.{stamp}.gif"
+            # 2. gen
+            r = subprocess.run(
+                [ffmpeg, "-y", "-ss", str(st), "-to", str(ed),
+                 "-i", str(self.media_path), "-i", str(palette),
+                 "-lavfi", "fps=12,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse",
+                 str(out)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if r.returncode != 0:
+                raise RuntimeError(f"gif gen failed: {r.stderr[-300:]}")
+            size_mb = out.stat().st_size / 1024 / 1024
+            self.after(0, lambda o=out, m=size_mb: messagebox.showinfo(
+                "GIF 完成", f"✓ {o.name}\n大小:{m:.1f} MB\n\n{o}"))
+            self.after(0, lambda o=out: self.status_lbl.configure(
+                text=f"✓ GIF → output/gif/{o.name}"))
+        except Exception as e:
+            err_msg = str(e)
+            self.after(0, lambda: messagebox.showerror("GIF 失敗", err_msg))
+        finally:
+            self.after(0, lambda: overlay_ref["ov"].done() if overlay_ref["ov"] else None)
+
     # ----------------- 圖片疊加 -----------------
 
     def _pick_image_overlay(self):
@@ -3333,6 +3554,8 @@ class SRTToolV2(ctk.CTk):
                 burn_secondary_size=burn_secondary_size,
                 burn_srt_secondary=sec_srt,
                 audio_opts=audio_opts,
+                fade_in=self.fade_in_var.get(),
+                fade_out=self.fade_out_var.get(),
                 codec_args=codec_args,
                 total_dur=self.player.duration,
             )
@@ -3426,6 +3649,7 @@ class SRTToolV2(ctk.CTk):
                         burn_srt_secondary: Path | None = None,
                         image_overlays: list | None = None,
                         audio_opts: dict | None = None,
+                        fade_in: bool = False, fade_out: bool = False,
                         codec_args: list = None, total_dur: float = 0):
         """ffmpeg 輸出 pipeline:
         - 有 cuts:用 stream-copy 切出保留片段 → concat
@@ -3591,6 +3815,14 @@ class SRTToolV2(ctk.CTk):
                     vf_parts.extend(self._build_drawtext_filters(overlays, tmp_dir))
                 if abs(speed - 1.0) > 0.001:
                     vf_parts.append(f"setpts=PTS/{speed}")
+                # 淡入淡出(套在最後,以最終 duration 為基準)
+                eff_dur_for_fade = sum(min(ed, total_dur) - max(0, cs)
+                                        for cs, ed in keeps) / max(speed, 0.01) \
+                                   if keeps else (total_dur / max(speed, 0.01))
+                if fade_in:
+                    vf_parts.append("fade=t=in:st=0:d=1.5")
+                if fade_out and eff_dur_for_fade > 2:
+                    vf_parts.append(f"fade=t=out:st={eff_dur_for_fade-1.5:.2f}:d=1.5")
 
                 # 音訊處理:多個 bg clip 或 image overlay → filter_complex / 純 mute → -an / 否則 -filter:a
                 if has_bg or has_img:

@@ -74,8 +74,8 @@
 ### 影像處理
 - ⏳ 明亮度 / 對比 / 飽和度 / 色溫(ffmpeg `eq`)
 - ⏳ 旋轉 90° / 180° / 水平翻轉
-- ⏳ 淡入淡出(fade in/out)
-- ⏳ 片段過渡 crossfade
+- ✅ 淡入淡出(fade in/out)— 2026-05-13(輸出卡新增 checkbox,1.5s 黑場)
+- ⏳ 片段過渡 crossfade(需重 encode,xfade filter,複雜度高暫緩)
 - ⏳ 去手震 deshake
 - ⏳ 倒帶播放 reverse
 
@@ -92,10 +92,10 @@
 
 ### 工作流 UX
 - ⏳ 拖放載入(影片 / SRT)
-- ⏳ Ctrl+Z / Ctrl+Y 撤銷重做
-- ⏳ 快捷鍵(Space 播停 / J K L 倒停順 / I O 起終 / Del 刪當前剪輯)
-- ⏳ 當前 frame 截圖另存(PNG 海報)
-- ⏳ GIF 輸出(短片預覽)
+- ✅ Ctrl+Z / Ctrl+Y 撤銷重做 — 2026-05-13(state snapshot stack,深度 50)
+- ✅ 快捷鍵 — 2026-05-13(Space 播停 / J K L 倒停順 / I O 起終 / Del 刪最後剪輯 / S 截圖 / Ctrl+S 存項目 / Ctrl+O 開項目 / ←→ 進退 5s)
+- ✅ 當前 frame 截圖另存 PNG — 2026-05-13(transport bar 📷 按鈕 + S 快捷鍵)
+- ✅ GIF 輸出 — 2026-05-13(transport bar 🎞 按鈕,palette 兩階段最佳化品質)
 - ⏳ 批次處理(多影片套同設定)
 - ⏳ Audio waveform 視覺化(時間軸下加波形)
 
@@ -104,8 +104,8 @@
 - ⏳ GPU 加速編碼(h264_nvenc / qsv)
 - ⏳ 兩階段編碼(2-pass)
 - ⏳ 10-bit / HDR
-- ⏳ 多音軌 / 多字幕軌
-- 💭 串流推送(RTMP)
+- ⏳ 多音軌 / 多字幕軌(需 container `-map` 拼接,UI 複雜)
+- ⏳ 串流推送 RTMP(已研究,見 README;ffmpeg `-f flv rtmp://...` 一行搞定)
 
 ---
 
