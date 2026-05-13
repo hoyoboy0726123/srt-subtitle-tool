@@ -1,0 +1,25 @@
+# SRT 字幕工具 V2 — 依賴清單
+# Python 3.11+
+
+# GUI
+customtkinter>=5.2.2
+
+# 環境變數
+python-dotenv>=1.0.0
+
+# Gemini SDK(校正 + Gemini 轉錄)
+google-genai>=0.3.0
+
+# Groq API(Whisper 轉錄,走 OpenAI-compatible endpoint)
+requests>=2.31.0
+
+# 媒體處理(ffmpeg / ffprobe 用)
+imageio-ffmpeg>=0.5.1
+
+# V2 新增:影片播放(嵌入 tkinter)
+# 注意:python-vlc 需要系統安裝 VLC media player(會提供 libvlc.dll)
+# 下載:https://www.videolan.org/vlc/
+python-vlc>=3.0.0
+
+# V2 新增:框選裁切(在 dialog 上顯示截圖讓使用者拖曳)
+Pillow>=10.0.0

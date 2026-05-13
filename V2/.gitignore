@@ -16,13 +16,6 @@ venv/
 # 輸出檔(由工具生成,不該 commit)
 output/
 
-# PyInstaller dist
-dist/
-build/
-*.spec
-V2/dist/
-V2/build/
-
 # 本地 SQLite 額度資料庫
 ~/.srt_corrector/
 .srt_corrector/
