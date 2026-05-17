@@ -14,4 +14,4 @@ if not exist .env (
     exit /b 1
 )
 
-start "" .venv\Scripts\pythonw.exe srt_corrector_gui.py
+start "" .venv\Scripts\pythonw.exe srt_tool_v2.py

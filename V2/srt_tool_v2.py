@@ -329,6 +329,18 @@ class VLCPlayer:
     def is_playing(self) -> bool:
         return bool(self.player.is_playing())
 
+    def is_ended(self) -> bool:
+        """影片是否已播畢(VLC Ended 狀態;此時 play() 無法直接重播)。"""
+        try:
+            return self.player.get_state() == self.vlc.State.Ended
+        except Exception:
+            return False
+
+    def replay(self):
+        """從頭重新播放。Ended 狀態下 play() 無效,需先 stop 重置再播。"""
+        self.player.stop()
+        self.player.play()
+
     def get_time_sec(self) -> float:
         ms = self.player.get_time()
         return ms / 1000.0 if ms >= 0 else 0.0
@@ -764,6 +776,8 @@ class SRTToolV2(ctk.CTk):
         self.cut_out: float | None = None
         # 框選裁切:(x, y, w, h, orig_w, orig_h) in 原始影片座標
         self.crop_region: tuple[int, int, int, int, int, int] | None = None
+        # 裁切若來自長寬比預設,記下比例 (rw, rh) — 預覽改用 VLC 比例裁切
+        self._crop_aspect: tuple[int, int] | None = None
         # 文字疊加清單:每筆 dict(text/font_name/font_path/size/color/color_name/position/border)
         self.text_overlays: list[dict] = []
         # 剪輯預覽 state — preview 模式:VLC 載入暫存的剪輯後 mp4 + SRT 重新對應
@@ -791,6 +805,30 @@ class SRTToolV2(ctk.CTk):
         load_dotenv()
 
     # ----------------- UI -----------------
+
+    def _toggle_left_panel(self):
+        """收折 / 展開左側 SRT 同步面板,讓出空間給中間影片區。"""
+        if self._left_panel_collapsed:
+            self.srt_col.pack(side="left", fill="y",
+                              before=self.left_collapse_btn)
+            self.left_collapse_btn.configure(text="◀")
+            self._left_panel_collapsed = False
+        else:
+            self.srt_col.pack_forget()
+            self.left_collapse_btn.configure(text="▶")
+            self._left_panel_collapsed = True
+
+    def _toggle_right_panel(self):
+        """收折 / 展開右側編輯控制面板,讓出空間給中間影片區。"""
+        if self._right_panel_collapsed:
+            self.edit_col.pack(side="right", fill="y",
+                               before=self.right_collapse_btn)
+            self.right_collapse_btn.configure(text="▶")
+            self._right_panel_collapsed = False
+        else:
+            self.edit_col.pack_forget()
+            self.right_collapse_btn.configure(text="◀")
+            self._right_panel_collapsed = True
 
     def _build_ui(self):
         # 頂部:檔案選擇
@@ -838,25 +876,51 @@ class SRTToolV2(ctk.CTk):
         ctk.CTkButton(srt_row, text="選 SRT", width=70,
                       command=self._pick_srt).pack(side="left", padx=2)
 
-        # 三欄佈局:① SRT 同步(左) ② 影片預覽 + transport(中) ③ 編輯控制(右,scroll)
+        # 三欄佈局:① SRT 同步(左) ② 影片預覽(中) ③ 編輯控制(右)
+        # 左右兩側可「收折」讓出空間給中間影片區;不收折時即原始比例。
         main_row = ctk.CTkFrame(self, fg_color="transparent")
         main_row.pack(fill="both", expand=True, padx=14, pady=8)
 
-        # left:SRT 同步面板 — 移到最左,跟 V1 字幕介面感覺接近
+        # ① 左:SRT 同步面板(寬 340,可收折)
         srt_col = ctk.CTkFrame(main_row, fg_color=("#f8fafc", "#0d1117"),
                                 border_color=("#e2e8f0", "#262b33"),
                                 border_width=1, corner_radius=8, width=340)
-        srt_col.pack(side="left", fill="y", padx=(0, 6))
+        srt_col.pack(side="left", fill="y")
         srt_col.pack_propagate(False)
+        self.srt_col = srt_col
 
-        # right:編輯控制(剪輯/裁切/文字/輸出),Scroll 避免擠
+        # 左收折鈕(細長條,永遠可見)
+        self.left_collapse_btn = ctk.CTkButton(
+            main_row, text="◀", width=22, corner_radius=0,
+            fg_color=("#e2e8f0", "#262b33"),
+            hover_color=("#cbd5e1", "#374151"),
+            text_color=("#475569", "#9ca3af"),
+            command=self._toggle_left_panel,
+        )
+        self.left_collapse_btn.pack(side="left", fill="y", padx=(2, 6))
+
+        # ③ 右:編輯控制(剪輯/裁切/文字/輸出),寬 460,可收折
         edit_col = ctk.CTkScrollableFrame(main_row, fg_color="transparent",
                                            width=460)
-        edit_col.pack(side="right", fill="y", padx=(6, 0))
+        edit_col.pack(side="right", fill="y")
+        self.edit_col = edit_col
 
-        # middle:影片預覽 + transport(占用中間 flex 空間)
+        # 右收折鈕(細長條,永遠可見)
+        self.right_collapse_btn = ctk.CTkButton(
+            main_row, text="▶", width=22, corner_radius=0,
+            fg_color=("#e2e8f0", "#262b33"),
+            hover_color=("#cbd5e1", "#374151"),
+            text_color=("#475569", "#9ca3af"),
+            command=self._toggle_right_panel,
+        )
+        self.right_collapse_btn.pack(side="right", fill="y", padx=(6, 2))
+
+        # ② 中:影片預覽 + transport(占用中間 flex 空間)
         left_col = ctk.CTkFrame(main_row, fg_color="transparent")
-        left_col.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        left_col.pack(side="left", fill="both", expand=True)
+
+        self._left_panel_collapsed = False
+        self._right_panel_collapsed = False
 
         # video host — 用原生 tk.Frame,不能用 CTkFrame!
         # CTkFrame 底層會塞一個 Canvas 蓋住 VLC 渲染區(造成有聲無畫面的 bug)。
@@ -1458,7 +1522,50 @@ class SRTToolV2(ctk.CTk):
             return
         self._load_srt(Path(p))
 
+    def _reset_edit_state(self):
+        """載入新影片前,清空上一支影片的所有編輯紀錄,回到乾淨狀態。
+
+        包含:剪輯片段、裁切、文字 / 圖片疊加、背景音、變速、還原 / 重做堆疊,
+        以及剪輯預覽模式(隱藏「還原原始」按鈕)。
+        """
+        # 1) 若還停在剪輯預覽模式 → 直接退出預覽 UI(不重載舊片)
+        if getattr(self, "cut_preview_active", False):
+            self.cut_preview_active = False
+            try:
+                self.cut_restore_btn.pack_forget()
+                self.cut_apply_btn.pack(side="left", padx=2)
+                self.cut_apply_btn.configure(state="normal", text="📺 套用剪輯預覽")
+                self.cut_preview_status_lbl.configure(text="")
+            except Exception:
+                pass
+        self.original_media_path = None
+        self.original_srt_blocks = []
+
+        # 2) 清空各類編輯紀錄(沿用既有 clear 函式,會一併刷新 UI)
+        self._clear_cuts()
+        self._clear_crop()
+        self._clear_text_overlays()
+        self._clear_image_overlays()
+        self._clear_bg_clips()
+
+        # 3) 變速回 1.0x
+        try:
+            self.speed_var.set("1.0x")
+        except Exception:
+            pass
+
+        # 4) 還原 / 重做 堆疊清空
+        self._undo_stack = []
+        self._redo_stack = []
+
+        # 5) 其它一次性狀態
+        self._srt_dirty = False
+        self.secondary_srt_path = None
+
     def _load_media(self, path: Path):
+        # 換片 → 先清空上一支影片的所有編輯紀錄(剪輯 / 裁切 / 疊加 / 音訊 /
+        # 變速 / 剪輯預覽「還原原始」按鈕),避免狀態錯亂。
+        self._reset_edit_state()
         self.media_path = path
         self.media_entry.delete(0, "end")
         self.media_entry.insert(0, str(path))
@@ -1478,7 +1585,11 @@ class SRTToolV2(ctk.CTk):
                 self.video_host.update()
                 self.player = VLCPlayer(self.video_host)
             self.player.load(path)
-            # 套用既有的 crop preview + SRT 字幕(換片時保留設定)
+            try:
+                self.player.set_rate(1.0)  # 換片 → 播放速度回 1.0x
+            except Exception:
+                pass
+            # crop 已於 _reset_edit_state 清空,這裡套用即還原成無裁切
             self._apply_crop_preview()
             self._apply_srt_subtitle_preview()
             self._build_timeline_thumbnails()
@@ -2012,7 +2123,11 @@ class SRTToolV2(ctk.CTk):
             self.player.pause()
             self.play_btn.configure(text="▶ 播放")
         else:
-            self.player.play()
+            # 影片播畢(Ended)後 VLC 不會從 play() 直接重播 → 需先重置
+            if self.player.is_ended():
+                self.player.replay()
+            else:
+                self.player.play()
             self.play_btn.configure(text="⏸ 暫停")
 
     def _seek_rel(self, delta: float):
@@ -2157,6 +2272,40 @@ class SRTToolV2(ctk.CTk):
         self.status_lbl.configure(text="ffmpeg 套用剪輯中,稍候...")
         threading.Thread(target=self._build_cut_preview, daemon=True).start()
 
+    def _ffmpeg_cut_join(self, in_path, keeps, out_path, preset="medium", crf=18):
+        """用 select / aselect 濾鏡一次過保留 keeps 內的多個片段 → out_path。
+
+        為什麼不用 stream-copy 切片 + concat:stream-copy 只能在關鍵影格切,
+        切點不準會回退到前一個 keyframe;concat demuxer 在接點對這些帶非零 /
+        負時間戳的片段處理不一致,會吃掉內容 —— 這正是「未剪輯片段消失一部分」
+        的根因。select 濾鏡逐幀篩選 + setpts 重新編號,frame-accurate,
+        且整段只跑一次編碼。
+
+        keeps:[(start_sec, end_sec), ...](原始時間軸)。失敗丟 RuntimeError。
+        """
+        ffmpeg = get_ffmpeg()
+        expr = "+".join(f"between(t,{st:.3f},{ed:.3f})" for st, ed in keeps)
+        vf = f"select='{expr}',setpts=N/FRAME_RATE/TB"
+        af = f"aselect='{expr}',asetpts=N/SR/TB"
+
+        def _run(with_audio):
+            cmd = [ffmpeg, "-y", "-i", str(in_path), "-vf", vf]
+            if with_audio:
+                cmd += ["-af", af, "-c:a", "aac", "-b:a", "192k"]
+            else:
+                cmd += ["-an"]
+            cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+                    str(out_path)]
+            return subprocess.run(cmd, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace")
+
+        r = _run(with_audio=True)
+        if r.returncode != 0:
+            # 來源可能無音軌 → 退回純影像再試一次
+            r2 = _run(with_audio=False)
+            if r2.returncode != 0:
+                raise RuntimeError(f"剪輯重新編碼失敗: {r.stderr[-300:]}")
+
     def _build_cut_preview(self):
         overlay_ref = {"ov": None}
         self.after(0, lambda: overlay_ref.update(
@@ -2179,35 +2328,17 @@ class SRTToolV2(ctk.CTk):
             if not keeps:
                 raise RuntimeError("剪完無剩餘片段")
 
-            ffmpeg = get_ffmpeg()
             sig = hashlib.md5(f"{self.media_path}_{self.cuts}".encode()).hexdigest()[:10]
             tmp_dir = Path(tempfile.gettempdir()) / f"srt_v2_cutpv_{sig}"
             tmp_dir.mkdir(parents=True, exist_ok=True)
-            seg_paths = []
-            total_keeps = len(keeps)
-            for i, (st, ed) in enumerate(keeps):
-                set_detail(f"切片 {i+1}/{total_keeps}({st:.1f}~{ed:.1f}s)...")
-                seg = tmp_dir / f"seg_{i:03d}.mp4"
-                seg_paths.append(seg)
-                cmd = [ffmpeg, "-y", "-ss", str(st), "-to", str(ed),
-                       "-i", str(self.media_path), "-c", "copy", str(seg)]
-                r = subprocess.run(cmd, capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace")
-                if r.returncode != 0:
-                    raise RuntimeError(f"切 {i} 失敗: {r.stderr[-200:]}")
-
-            set_detail(f"concat 接合 {total_keeps} 個片段...")
-            list_file = tmp_dir / "concat.txt"
-            list_file.write_text(
-                "\n".join(f"file '{p.name}'" for p in seg_paths),
-                encoding="utf-8")
             out_path = tmp_dir / "cut_preview.mp4"
-            cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0",
-                   "-i", str(list_file), "-c", "copy", str(out_path)]
-            r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(tmp_dir),
-                                encoding="utf-8", errors="replace")
-            if r.returncode != 0:
-                raise RuntimeError(f"concat 失敗: {r.stderr[-200:]}")
+
+            # 用 select 濾鏡一次過保留多個片段(frame-accurate)。取代原本的
+            # 「stream-copy 切片 + concat」—— 後者在非關鍵影格切點會掉幀、
+            # concat 接點會吃掉未剪輯內容(就是這次回報的 bug)。
+            set_detail(f"重新編碼保留片段({len(keeps)} 段,請稍候)...")
+            self._ffmpeg_cut_join(self.media_path, keeps, out_path,
+                                  preset="ultrafast", crf=26)
 
             new_dur = sum(ed - st for st, ed in keeps)
             self.after(0, lambda: self._enter_cut_preview_mode(out_path, new_dur))
@@ -2342,6 +2473,7 @@ class SRTToolV2(ctk.CTk):
 
     def _on_crop_confirm(self, region: tuple[int, int, int, int, int, int]):
         self.crop_region = region
+        self._crop_aspect = None  # 框選裁切是任意視窗,非比例
         x, y, w, h, ow, oh = region
         self.crop_status_lbl.configure(
             text=f"裁切: {w}×{h} @ ({x}, {y})  原 {ow}×{oh}",
@@ -2353,6 +2485,7 @@ class SRTToolV2(ctk.CTk):
 
     def _clear_crop(self):
         self.crop_region = None
+        self._crop_aspect = None
         self.crop_status_lbl.configure(
             text="裁切:無(輸出時保留完整畫面)",
             text_color=("#6b7280", "#9ca3af"),
@@ -2992,6 +3125,8 @@ class SRTToolV2(ctk.CTk):
             return
 
         self.crop_region = (cx, cy, new_w, new_h, ow, oh)
+        # 記下這是「比例」裁切 → 預覽用 VLC 比例裁切字串(最穩)
+        self._crop_aspect = (ratio_w, ratio_h)
         self.crop_status_lbl.configure(
             text=f"裁切: {new_w}×{new_h} @ ({cx}, {cy})  {ratio_w}:{ratio_h}  原 {ow}×{oh}",
             text_color=("#0891b2", "#67e8f9"),
@@ -3000,27 +3135,26 @@ class SRTToolV2(ctk.CTk):
         self._apply_crop_preview()
 
     def _apply_crop_preview(self):
-        """把 self.crop_region 套到 VLC player 即時預覽 + 設正確 aspect ratio。"""
+        """把當前裁切套到 VLC 做即時預覽。
+
+        長寬比預設(9:16 / 1:1 / 16:9)→ 用 VLC 的「比例」裁切字串
+        video_set_crop_geometry("9:16"),由 VLC 自動置中裁切。這是 VLC
+        內建的裁切模式(等同 VLC 選單的 16:9 / 4:3 / 1:1),最穩定。
+        先前用 "WxH+X+Y" 視窗格式在這版 libvlc 套不上去(9:16 全黑、
+        1:1 異常)。框選裁切是任意視窗 → 才用 "WxH+X+Y" 格式。
+        """
         if self.player is None or self.player.player is None:
             return
+        p = self.player.player
         try:
-            if self.crop_region:
+            if getattr(self, "_crop_aspect", None):
+                rw, rh = self._crop_aspect
+                p.video_set_crop_geometry(f"{rw}:{rh}")
+            elif self.crop_region:
                 x, y, w, h, _, _ = self.crop_region
-                self.player.player.video_set_crop_geometry(f"{w}x{h}+{x}+{y}")
-                # 同步告訴 VLC 內容比例,避免 player 把方型 letterbox 成歪比例
-                try:
-                    # 簡化比例為最小整數對(gcd)
-                    from math import gcd
-                    g = gcd(w, h)
-                    self.player.player.video_set_aspect_ratio(f"{w//g}:{h//g}")
-                except Exception:
-                    pass
+                p.video_set_crop_geometry(f"{int(w)}x{int(h)}+{int(x)}+{int(y)}")
             else:
-                self.player.player.video_set_crop_geometry(None)
-                try:
-                    self.player.player.video_set_aspect_ratio(None)
-                except Exception:
-                    pass
+                p.video_set_crop_geometry(None)
         except Exception:
             pass
 
@@ -3502,7 +3636,21 @@ class SRTToolV2(ctk.CTk):
             fmt_key = self.out_format.get()
             ext, codec_args = OUTPUT_FORMATS[fmt_key]
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = output_dir(self.media_path, "edited") / f"{self.media_path.stem}.edited.{stamp}{ext}"
+            # 來源若本身就是先前的輸出檔(位於 output/edited 且檔名帶
+            # .edited.<時戳>),就匯出回同一個 output/edited 並剝掉舊時戳,
+            # 避免 output/edited/output/edited/ 目錄與 .edited.X.edited.Y 檔名層層巢狀。
+            import re as _re
+            src = self.media_path
+            stem = src.stem
+            _m = _re.match(r"^(.*)\.edited\.\d{8}_\d{6}$", stem)
+            if (_m and src.parent.name == "edited"
+                    and src.parent.parent.name == "output"):
+                edited_dir = src.parent
+                edited_dir.mkdir(parents=True, exist_ok=True)
+                stem = _m.group(1)
+            else:
+                edited_dir = output_dir(src, "edited")
+            out_path = edited_dir / f"{stem}.edited.{stamp}{ext}"
             self.after(0, lambda: self.status_lbl.configure(text=f"開始輸出 → {out_path.name}"))
 
             # 字幕燒入需要 SRT — 若勾了但沒 SRT 提早報錯
@@ -3557,13 +3705,21 @@ class SRTToolV2(ctk.CTk):
                 fade_in=self.fade_in_var.get(),
                 fade_out=self.fade_out_var.get(),
                 codec_args=codec_args,
-                total_dur=self.player.duration,
+                # 必須用 in_path(= self.media_path)的真實時長。剪輯預覽模式下
+                # player 載入的是預覽檔,self.player.duration 會是剪輯後的較短
+                # 時長,拿來算 keeps 會誤判 → 匯出未剪輯內容。
+                total_dur=get_media_duration(self.media_path),
             )
 
             set_detail("收尾...")
             # 同步輸出新 SRT
             if self.export_srt_var.get() and self.srt_blocks:
-                new_blocks = self._apply_edits_to_srt(self.srt_blocks, self.cuts, speed)
+                # 剪輯預覽模式下 self.srt_blocks 已是「剪輯後」字幕;要從原始
+                # 字幕重新套 cuts/speed,否則 cuts 會被重複套用。
+                srt_src = (self.original_srt_blocks
+                           if self.cut_preview_active and self.original_srt_blocks
+                           else self.srt_blocks)
+                new_blocks = self._apply_edits_to_srt(srt_src, self.cuts, speed)
                 new_srt = serialize_srt(new_blocks)
                 srt_out = out_path.with_suffix(".srt")
                 srt_out.write_text(new_srt, encoding="utf-8")
@@ -3689,35 +3845,19 @@ class SRTToolV2(ctk.CTk):
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Phase 1:用 -c copy 切出保留片段(快)
+            # Phase 1:把保留片段接成一個乾淨檔
             if len(keeps) == 1 and keeps[0] == (0.0, total_dur):
                 # 沒切 → 直接拿原檔
                 concat_input = in_path
                 concat_mode = "file"  # 單檔
             else:
-                seg_paths = []
-                for i, (st, ed) in enumerate(keeps):
-                    seg = tmp_dir / f"seg_{i:03d}.mp4"
-                    seg_paths.append(seg)
-                    cmd = [
-                        ffmpeg, "-y",
-                        "-ss", str(st), "-to", str(ed),
-                        "-i", str(in_path),
-                        "-c", "copy",
-                        str(seg),
-                    ]
-                    r = subprocess.run(cmd, capture_output=True, text=True,
-                                       encoding="utf-8", errors="replace")
-                    if r.returncode != 0:
-                        raise RuntimeError(f"切片 {i} 失敗: {r.stderr[-300:]}")
-                # Phase 2:concat
-                list_file = tmp_dir / "concat.txt"
-                list_file.write_text(
-                    "\n".join(f"file '{p.name}'" for p in seg_paths),
-                    encoding="utf-8",
-                )
-                concat_input = list_file
-                concat_mode = "concat"
+                # 用 select 濾鏡一次過保留多片段(frame-accurate),取代會掉幀的
+                # stream-copy 切片 + concat;產出單一乾淨檔,下游當單檔處理。
+                cut_file = tmp_dir / "cut_joined.mp4"
+                self._ffmpeg_cut_join(in_path, keeps, cut_file,
+                                      preset="medium", crf=18)
+                concat_input = cut_file
+                concat_mode = "file"
 
             # Phase 3:最終輸出 — 視是否需要 filter 決定一步到位 or 兩階段
             if not need_filter:
@@ -4107,6 +4247,9 @@ class SRTToolV2(ctk.CTk):
                 self._highlight_current_block(t)
                 self._update_overlay_preview(t)
                 self._update_timeline_indicator(t)
+                # 影片播畢 → 按鈕還原「播放」,使用者可再按一次重播
+                if self.player.is_ended():
+                    self.play_btn.configure(text="▶ 播放")
         except Exception:
             pass
         finally:
