@@ -13,7 +13,7 @@ V2 主要目的是給「拿到 SRT 後想剪片 + 對字幕」的場景。
 依賴 VLC media player:https://www.videolan.org/vlc/
 """
 
-import os, sys, re, json, time, threading, subprocess
+import os, sys, re, json, time, threading, subprocess, tempfile, shutil, atexit, hashlib
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from tkinter import filedialog, messagebox
@@ -28,6 +28,9 @@ from dotenv import load_dotenv
 VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".wmv")
 AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma")
 MEDIA_EXTS = VIDEO_EXTS + AUDIO_EXTS
+
+# 圖片疊加即時預覽:縮放後圖檔的暫存目錄(啟動時清空、結束時刪除)
+IMG_CACHE_DIR = Path(tempfile.gettempdir()) / "srt_v2_imgcache"
 
 OUTPUT_FORMATS = {
     "mp4 · H.264 (預設)":   (".mp4", ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "128k"]),
@@ -792,6 +795,17 @@ class SRTToolV2(ctk.CTk):
         self.secondary_srt_path: Path | None = None
         self.player: VLCPlayer | None = None
         self.current_active_block_idx: int | None = None
+
+        # 圖片疊加即時預覽(VLC logo filter)— 縮放後暫存 PNG 的快取
+        self._img_logo_cache: dict = {}   # {(path, scale): 縮放後 png 路徑}
+        self._img_logo_sig = None         # 目前顯示中的 logo 簽章,變了才重設
+        try:
+            if IMG_CACHE_DIR.exists():
+                shutil.rmtree(IMG_CACHE_DIR, ignore_errors=True)
+            IMG_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        atexit.register(lambda: shutil.rmtree(IMG_CACHE_DIR, ignore_errors=True))
 
         self._build_ui()
         # tick loop 200ms 更新時間 / 同步字幕高亮
@@ -4236,6 +4250,102 @@ class SRTToolV2(ctk.CTk):
         except Exception:
             pass
 
+    # ----------------- 圖片疊加 logo preview -----------------
+
+    def _get_scaled_image(self, overlay) -> Path | None:
+        """依 overlay 的 scale 把圖片預縮放成暫存 PNG,回傳路徑(快取)。
+
+        VLC logo filter 不能縮放圖片 → 先用 Pillow 縮好再交給 logo;
+        同時統一轉成 ASCII 檔名的 PNG,避開中文路徑 / 格式問題。
+        """
+        try:
+            src = Path(overlay["path"])
+        except Exception:
+            return None
+        if not src.exists():
+            return None
+        scale = float(overlay.get("scale", 1.0) or 1.0)
+        scale = max(0.01, min(8.0, scale))
+        key = (str(src), round(scale, 3))
+        cached = self._img_logo_cache.get(key)
+        if cached and Path(cached).exists():
+            return Path(cached)
+        try:
+            from PIL import Image
+            img = Image.open(src).convert("RGBA")
+            nw = max(1, int(round(img.width * scale)))
+            nh = max(1, int(round(img.height * scale)))
+            img = img.resize((nw, nh), Image.LANCZOS)
+            name = "logo_" + hashlib.md5(repr(key).encode()).hexdigest()[:14] + ".png"
+            out = IMG_CACHE_DIR / name
+            IMG_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            img.save(out)
+            self._img_logo_cache[key] = out
+            return out
+        except Exception:
+            return None
+
+    def _update_image_overlay_preview(self, current_time: float):
+        """VLC logo filter 即時預覽圖片疊加(對應文字的 marquee)。
+
+        logo filter 一次只能顯示一張 → 找當前時間 active 的第一筆。
+        簽章沒變就不重設,避免每個 tick 重載圖片。
+        """
+        if self.player is None or self.player.player is None:
+            return
+        try:
+            import vlc
+        except Exception:
+            return
+        p = self.player.player
+
+        active = None
+        for ov in self.image_overlays:
+            s = ov.get("start_sec")
+            e = ov.get("end_sec")
+            if s is not None and current_time < s:
+                continue
+            if e is not None and current_time > e:
+                continue
+            active = ov
+            break
+
+        if active is None:
+            try:
+                p.video_set_logo_int(vlc.VideoLogoOption.logo_enable, 0)
+            except Exception:
+                pass
+            self._img_logo_sig = None
+            return
+
+        sig = (str(active.get("path")), active.get("scale"), active.get("opacity"),
+               active.get("pos_mode"), active.get("pos_name"),
+               active.get("x_px"), active.get("y_px"))
+        if sig == self._img_logo_sig:
+            return
+
+        logo_path = self._get_scaled_image(active)
+        if logo_path is None:
+            return
+        try:
+            p.video_set_logo_string(vlc.VideoLogoOption.logo_file, str(logo_path))
+            opacity = max(0.0, min(1.0, float(active.get("opacity", 1.0) or 1.0)))
+            p.video_set_logo_int(vlc.VideoLogoOption.logo_opacity, int(opacity * 255))
+            if active.get("pos_mode") == "absolute":
+                p.video_set_logo_int(vlc.VideoLogoOption.logo_position, -1)
+                p.video_set_logo_int(vlc.VideoLogoOption.logo_x, int(active.get("x_px", 0)))
+                p.video_set_logo_int(vlc.VideoLogoOption.logo_y, int(active.get("y_px", 0)))
+            else:
+                anchor, ox, oy = self._MARQUEE_ANCHOR.get(
+                    active.get("pos_name", "底部中央"), (8, 0, 30))
+                p.video_set_logo_int(vlc.VideoLogoOption.logo_position, anchor)
+                p.video_set_logo_int(vlc.VideoLogoOption.logo_x, ox)
+                p.video_set_logo_int(vlc.VideoLogoOption.logo_y, oy)
+            p.video_set_logo_int(vlc.VideoLogoOption.logo_enable, 1)
+            self._img_logo_sig = sig
+        except Exception:
+            pass
+
     # ----------------- tick:更新時間 / 高亮字幕 / overlay preview -----------------
 
     def _tick(self):
@@ -4246,6 +4356,7 @@ class SRTToolV2(ctk.CTk):
                 self.scrubber.set(min(t, self.player.duration))
                 self._highlight_current_block(t)
                 self._update_overlay_preview(t)
+                self._update_image_overlay_preview(t)
                 self._update_timeline_indicator(t)
                 # 影片播畢 → 按鈕還原「播放」,使用者可再按一次重播
                 if self.player.is_ended():
